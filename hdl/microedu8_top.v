@@ -19,6 +19,7 @@
 //   A a  JNZ a  (se A != 0, PC <- a)
 //   B 0  IN     (A <- chaves SW[7:0])
 //   C 0  OUT    (saida <- A, aparece em HEX3:HEX2)
+//   D a  LDN a  (A <- M[M[a]])    E a  STN a  (M[M[a]] <- A)    [endereco indireto]
 // Memoria: 00-7F = ROM (programa)   80-FF = RAM (variaveis)
 // ==============================================================
 
@@ -54,17 +55,39 @@ module microedu8_cpu (
         for (i = 0; i < 128; i = i + 1) ram[i] = 8'h00;
     end
 
-    // ROM de programa (enderecos 00-7F). Demonstracao de entrada e saida:
-    //   le as chaves, guarda na RAM, soma consigo mesmo (dobro) e mostra em OUT.
+    // ROM de programa (enderecos 00-7F). Demonstracao de LDN/STN (enderecos indiretos):
+    //   copia 3 bytes da tabela na ROM (30-32) para a RAM (90-92) com um laco,
+    //   depois soma os 3 bytes copiados: 11 + 22 + 33 = 66, mostra em OUT e para.
     function [7:0] programa;
         input [7:0] endereco;
         begin
             case (endereco)
-                8'h00: programa = 8'h0B;  8'h01: programa = 8'h00;   // inicio: IN
-                8'h02: programa = 8'h05;  8'h03: programa = 8'h80;   // STA 80
-                8'h04: programa = 8'h06;  8'h05: programa = 8'h80;   // ADD 80  (A = 2 x chaves)
-                8'h06: programa = 8'h0C;  8'h07: programa = 8'h00;   // OUT
-                8'h08: programa = 8'h08;  8'h09: programa = 8'h00;   // JMP inicio
+            // ---- gerado por montador.py ----
+                8'h00: programa = 8'h01;  8'h01: programa = 8'h30;   // LDI 0x30
+                8'h02: programa = 8'h05;  8'h03: programa = 8'h80;   // STA orig
+                8'h04: programa = 8'h01;  8'h05: programa = 8'h90;   // LDI 0x90
+                8'h06: programa = 8'h05;  8'h07: programa = 8'h81;   // STA dest
+                8'h08: programa = 8'h01;  8'h09: programa = 8'h03;   // LDI 3
+                8'h0A: programa = 8'h05;  8'h0B: programa = 8'h82;   // STA cont
+                8'h0C: programa = 8'h0D;  8'h0D: programa = 8'h80;   // copia: LDN orig
+                8'h0E: programa = 8'h0E;  8'h0F: programa = 8'h81;   // STN dest
+                8'h10: programa = 8'h04;  8'h11: programa = 8'h80;   // LDA orig
+                8'h12: programa = 8'h02;  8'h13: programa = 8'h01;   // ADDI 1
+                8'h14: programa = 8'h05;  8'h15: programa = 8'h80;   // STA orig
+                8'h16: programa = 8'h04;  8'h17: programa = 8'h81;   // LDA dest
+                8'h18: programa = 8'h02;  8'h19: programa = 8'h01;   // ADDI 1
+                8'h1A: programa = 8'h05;  8'h1B: programa = 8'h81;   // STA dest
+                8'h1C: programa = 8'h04;  8'h1D: programa = 8'h82;   // LDA cont
+                8'h1E: programa = 8'h03;  8'h1F: programa = 8'h01;   // SUBI 1
+                8'h20: programa = 8'h05;  8'h21: programa = 8'h82;   // STA cont
+                8'h22: programa = 8'h0A;  8'h23: programa = 8'h0C;   // JNZ copia
+                8'h24: programa = 8'h04;  8'h25: programa = 8'h90;   // LDA 0x90
+                8'h26: programa = 8'h06;  8'h27: programa = 8'h91;   // ADD 0x91
+                8'h28: programa = 8'h06;  8'h29: programa = 8'h92;   // ADD 0x92
+                8'h2A: programa = 8'h0C;  8'h2B: programa = 8'h00;   // OUT
+                8'h2C: programa = 8'h00;  8'h2D: programa = 8'h00;   // HLT
+                8'h30: programa = 8'h11;  8'h31: programa = 8'h22;   // tabela na ROM
+                8'h32: programa = 8'h33;
                 default: programa = 8'h00;
             endcase
         end
@@ -81,14 +104,14 @@ module microedu8_cpu (
                 4'd0: microcodigo = 16'h003;                       // Ep, Lm
                 4'd1: microcodigo = 16'h01c;                       // Er, Li, Cp
                 4'd2: case (op)
-                          4'd1, 4'd2, 4'd3, 4'd4, 4'd5, 4'd6, 4'd7, 4'd8, 4'd9, 4'd10, 4'd11, 4'd12:
+                          4'd1, 4'd2, 4'd3, 4'd4, 4'd5, 4'd6, 4'd7, 4'd8, 4'd9, 4'd10, 4'd11, 4'd12, 4'd13, 4'd14:
                                    microcodigo = 16'h003;          // Ep, Lm
                           default: microcodigo = 16'h200;          // HLT (e opcodes sem uso): Hlt
                       endcase
                 4'd3: case (op)
                           4'd1:    microcodigo = 16'h434;          // LDI: Er, La, Cp, Rst
                           4'd2, 4'd3: microcodigo = 16'h054;       // ADDI/SUBI: Er, Lb, Cp
-                          4'd4, 4'd5, 4'd6, 4'd7:
+                          4'd4, 4'd5, 4'd6, 4'd7, 4'd13, 4'd14:
                                    microcodigo = 16'h016;          // Er, Lm, Cp (MAR <- endereco)
                           4'd8:    microcodigo = 16'h2404;         // JMP: Er, Lp, Rst
                           4'd9:    microcodigo = zero ? 16'h2404   // JZ: pula se A = 0
@@ -106,11 +129,15 @@ module microedu8_cpu (
                           4'd5:    microcodigo = 16'h1c00;         // STA: Ea, Wm, Rst
                           4'd6, 4'd7:
                                    microcodigo = 16'h044;          // ADD/SUB: Er, Lb
+                          4'd13, 4'd14:
+                                   microcodigo = 16'h006;          // LDN/STN: Er, Lm (MAR <- M[ponteiro])
                           default: microcodigo = 16'h000;
                       endcase
                 4'd5: case (op)
                           4'd6:    microcodigo = 16'h4a0;          // ADD: Eu, La, Rst
                           4'd7:    microcodigo = 16'h5a0;          // SUB: Su, Eu, La, Rst
+                          4'd13:   microcodigo = 16'h424;          // LDN: Er, La, Rst
+                          4'd14:   microcodigo = 16'h1c00;         // STN: Ea, Wm, Rst
                           default: microcodigo = 16'h000;
                       endcase
                 default: microcodigo = 16'h000;
