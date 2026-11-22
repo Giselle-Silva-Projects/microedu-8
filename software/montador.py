@@ -17,6 +17,8 @@
 # Diretivas:
 #   .org ENDERECO         o codigo seguinte comeca neste endereco
 #   .byte v1, v2, ...     coloca bytes de dados soltos
+#   CALL nome / RET       chamar e voltar de uma sub-rotina (precisa de
+#                         RETORNO = endereco de uma variavel; 1 nivel so)
 #   .guardar_em ENDERECO  os bytes seguintes sao gravados (na ROM) a partir
 #                         deste endereco, mas os rotulos continuam valendo
 #                         para o endereco onde o codigo VAI RODAR (na RAM)
@@ -41,9 +43,15 @@ INSTRUCOES = {
     "OUT":  (0xC, "-"),
     "LDN":  (0xD, "n"),
     "STN":  (0xE, "n"),
+    "INK":  (0x10, "-"),
+    "JMPN": (0xF, "n"),
 }
+# pseudo-instrucoes: viram varias instrucoes (nome -> tamanho em bytes)
+#   CALL alvo  =  LDI volta / STA RETORNO / JMP alvo      (6 bytes)
+#   RET        =  JMPN RETORNO                            (2 bytes)
+PSEUDO = {"CALL": 6, "RET": 2}
 DIRETIVAS = (".org", ".byte", ".guardar_em")
-TAMANHO_ROM = 0x80   # enderecos 00-7F sao a ROM de programa
+TAMANHO_ROM = 0x98   # enderecos 00-97 sao a ROM de programa
 
 
 class ErroAsm(Exception):
@@ -86,6 +94,38 @@ def separar(linha):
     return rotulo, linha
 
 
+def codificar(mn, partes, simbolos, pc, num):
+    """Gera os bytes de uma instrucao (ou de CALL / RET)."""
+    if mn in PSEUDO:
+        if "RETORNO" not in simbolos:
+            raise ErroAsm(f"linha {num}: defina antes  RETORNO = endereco")
+        ret = simbolos["RETORNO"]
+        if mn == "RET":
+            if len(partes) > 1:
+                raise ErroAsm(f"linha {num}: RET nao tem operando")
+            dados = [0x0F, ret]
+        else:
+            if len(partes) < 2:
+                raise ErroAsm(f"linha {num}: CALL precisa de um nome")
+            alvo = numero(partes[1], simbolos, num)
+            dados = [0x01, pc + 6, 0x05, ret, 0x08, alvo]
+    else:
+        opcode, tipo = INSTRUCOES[mn]
+        if tipo == "-":
+            if len(partes) > 1:
+                raise ErroAsm(f"linha {num}: {mn} nao tem operando")
+            operando = 0
+        else:
+            if len(partes) < 2:
+                raise ErroAsm(f"linha {num}: {mn} precisa de um operando")
+            operando = numero(partes[1], simbolos, num)
+        dados = [opcode, operando]
+    for v in dados:
+        if not 0 <= v <= 255:
+            raise ErroAsm(f"linha {num}: valor {v} fora de 0..255")
+    return dados
+
+
 def montar(texto):
     linhas = texto.splitlines()
     simbolos = {}
@@ -118,6 +158,9 @@ def montar(texto):
             elif d == ".byte":
                 pc += len([x for x in args.split(",") if x.strip() != ""])
             continue                          # .guardar_em nao muda o pc
+        if mnem.upper() in PSEUDO:
+            pc += PSEUDO[mnem.upper()]
+            continue
         if mnem.upper() not in INSTRUCOES:
             raise ErroAsm(f"linha {num}: instrucao desconhecida '{mnem}'")
         pc += 2
@@ -152,19 +195,7 @@ def montar(texto):
                     raise ErroAsm(f"linha {num}: valor {v} fora de 0..255")
         else:
             partes = resto.split(None, 1)
-            mn = partes[0].upper()
-            opcode, tipo = INSTRUCOES[mn]
-            if tipo == "-":
-                if len(partes) > 1:
-                    raise ErroAsm(f"linha {num}: {mn} nao tem operando")
-                operando = 0
-            else:
-                if len(partes) < 2:
-                    raise ErroAsm(f"linha {num}: {mn} precisa de um operando")
-                operando = numero(partes[1], simbolos, num)
-                if not 0 <= operando <= 255:
-                    raise ErroAsm(f"linha {num}: operando {operando} fora de 0..255")
-            dados = [opcode, operando]
+            dados = codificar(partes[0].upper(), partes, simbolos, pc, num)
         grava = pc + delta
         for k in range(len(dados)):
             end_ = grava + k
@@ -181,16 +212,16 @@ def montar(texto):
 def formatar(saida):
     verilog = ["            // ---- gerado por montador.py ----"]
     for roda, grava, dados, original in sorted(saida, key=lambda x: x[1]):
-        for ini in range(0, len(dados), 4):          # ate 4 bytes por linha
-            pedaco = dados[ini:ini + 4]
+        for ini in range(0, len(dados), 2):          # ate 2 bytes por linha
+            pedaco = dados[ini:ini + 2]
             celulas = "  ".join(f"8'h{grava + ini + k:02X}: programa = 8'h{b:02X};"
                                 for k, b in enumerate(pedaco))
             comentario = f"   // {original}" if ini == 0 else ""
             verilog.append("                " + celulas + comentario)
-    listagem = ["Roda  Grava  Bytes        Fonte"]
+    listagem = ["Roda  Grava  Bytes              Fonte"]
     for roda, grava, dados, original in saida:
         bytes_txt = " ".join(f"{b:02X}" for b in dados)
-        listagem.append(f"{roda:02X}    {grava:02X}     {bytes_txt:<11}  {original}")
+        listagem.append(f"{roda:02X}    {grava:02X}     {bytes_txt:<17}  {original}")
     return "\n".join(verilog), "\n".join(listagem)
 
 
