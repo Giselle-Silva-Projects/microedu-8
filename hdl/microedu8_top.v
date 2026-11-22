@@ -3,13 +3,23 @@
 // Para a placa DE1-SoC (Cyclone V 5CSEMA5F31C6) e para o simulador.
 //   KEY[0] : da um passo (um clock da CPU) a cada aperto
 //   KEY[1] : reset
-//   SW[0]  : 1 = executa sozinho (automatico), 0 = so por botao
+//   SW[7:0]: entrada (instrucao IN le estas chaves)
+//   SW[9]  : 1 = executa sozinho (automatico), 0 = so por botao
+//   SW[8]  : 1 = automatico rapido (25x)
 //   HEX1:HEX0 : acumulador A em hexadecimal
+//   HEX3:HEX2 : registrador de saida (instrucao OUT)
 //   LEDR[7:0] : acumulador A em binario
 //   LEDR[8]   : 1 quando a CPU executou HLT
 //   LEDR[9]   : muda a cada passo
 // Instrucoes (2 bytes: opcode, operando):
-//   00 HLT   01 n LDI n   02 n ADDI n   03 n SUBI n
+//   0 HLT        1 n  LDI n    2 n  ADDI n    3 n  SUBI n
+//   4 a  LDA a  (A <- M[a])    5 a  STA a  (M[a] <- A)
+//   6 a  ADD a  (A <- A + M[a]) 7 a  SUB a  (A <- A - M[a])
+//   8 a  JMP a  (PC <- a)      9 a  JZ a   (se A = 0, PC <- a)
+//   A a  JNZ a  (se A != 0, PC <- a)
+//   B 0  IN     (A <- chaves SW[7:0])
+//   C 0  OUT    (saida <- A, aparece em HEX3:HEX2)
+// Memoria: 00-7F = ROM (programa)   80-FF = RAM (variaveis)
 // ==============================================================
 
 // ---------- CPU ----------
@@ -17,6 +27,8 @@ module microedu8_cpu (
     input  wire       clk,
     input  wire       ce,        // 1 = executa um passo neste clock
     input  wire       rst,       // reset geral (nivel 1)
+    input  wire [7:0] sw_in,     // chaves de entrada
+    output wire [7:0] saida_out, // registrador de saida (OUT)
     output wire [7:0] a_out,
     output wire [7:0] pc_out,
     output wire [7:0] ir_out,
@@ -24,61 +36,91 @@ module microedu8_cpu (
     output wire [3:0] t_out,
     output wire       halted
 );
-    reg [7:0] a, b, pc, mar, ir;
+    reg [7:0] a, b, pc, mar, ir, saida;
     reg [3:0] t;
     wire [7:0]  w, m, soma;
-    wire [11:0] palavra;
-    wire ep, lm, er, li, cp, la, lb, eu, su, hlt, rst_t;
+    wire [15:0] palavra;
+    wire ep, lm, er, li, cp, la, lb, eu, su, hlt, rst_t, ea, wm, lp, ei, lo;
+    wire z;
 
     initial begin
-        a = 0; b = 0; pc = 0; mar = 0; ir = 0; t = 0;
+        a = 0; b = 0; pc = 0; mar = 0; ir = 0; t = 0; saida = 0;
     end
 
-    // Memoria de programa (ROM 256 x 8): 1+2+3-4 = 2
+    // RAM: enderecos 80-FF (128 bytes)
+    reg [7:0] ram [0:127];
+    integer i;
+    initial begin
+        for (i = 0; i < 128; i = i + 1) ram[i] = 8'h00;
+    end
+
+    // ROM de programa (enderecos 00-7F). Demonstracao de entrada e saida:
+    //   le as chaves, guarda na RAM, soma consigo mesmo (dobro) e mostra em OUT.
     function [7:0] programa;
         input [7:0] endereco;
         begin
             case (endereco)
-                8'd0: programa = 8'h01;  8'd1: programa = 8'h01;   // LDI 1
-                8'd2: programa = 8'h02;  8'd3: programa = 8'h02;   // ADDI 2
-                8'd4: programa = 8'h02;  8'd5: programa = 8'h03;   // ADDI 3
-                8'd6: programa = 8'h03;  8'd7: programa = 8'h04;   // SUBI 4
-                8'd8: programa = 8'h00;                            // HLT
+                8'h00: programa = 8'h0B;  8'h01: programa = 8'h00;   // inicio: IN
+                8'h02: programa = 8'h05;  8'h03: programa = 8'h80;   // STA 80
+                8'h04: programa = 8'h06;  8'h05: programa = 8'h80;   // ADD 80  (A = 2 x chaves)
+                8'h06: programa = 8'h0C;  8'h07: programa = 8'h00;   // OUT
+                8'h08: programa = 8'h08;  8'h09: programa = 8'h00;   // JMP inicio
                 default: programa = 8'h00;
             endcase
         end
     endfunction
 
-    // Microcodigo: palavra de controle = f(T, opcode). Igual ao controle.txt
-    function [11:0] microcodigo;
+    // Microcodigo: palavra de controle = f(T, opcode, z). Igual ao controle.txt,
+    // com bits novos: Ea (A -> barramento), Wm (escreve na RAM), Lp (PC <- barramento)
+    function [15:0] microcodigo;
         input [3:0] passo;
         input [3:0] op;
+        input       zero;                                          // 1 quando A = 0
         begin
             case (passo)
-                4'd0: microcodigo = 12'h003;                       // Ep, Lm
-                4'd1: microcodigo = 12'h01c;                       // Er, Li, Cp
+                4'd0: microcodigo = 16'h003;                       // Ep, Lm
+                4'd1: microcodigo = 16'h01c;                       // Er, Li, Cp
                 4'd2: case (op)
-                          4'd0:    microcodigo = 12'h200;          // HLT: Hlt
-                          4'd1, 4'd2, 4'd3: microcodigo = 12'h003; // Ep, Lm
-                          default: microcodigo = 12'h000;
+                          4'd1, 4'd2, 4'd3, 4'd4, 4'd5, 4'd6, 4'd7, 4'd8, 4'd9, 4'd10, 4'd11, 4'd12:
+                                   microcodigo = 16'h003;          // Ep, Lm
+                          default: microcodigo = 16'h200;          // HLT (e opcodes sem uso): Hlt
                       endcase
                 4'd3: case (op)
-                          4'd1:    microcodigo = 12'h434;          // LDI: Er, La, Cp, Rst
-                          4'd2, 4'd3: microcodigo = 12'h054;       // Er, Lb, Cp
-                          default: microcodigo = 12'h000;
+                          4'd1:    microcodigo = 16'h434;          // LDI: Er, La, Cp, Rst
+                          4'd2, 4'd3: microcodigo = 16'h054;       // ADDI/SUBI: Er, Lb, Cp
+                          4'd4, 4'd5, 4'd6, 4'd7:
+                                   microcodigo = 16'h016;          // Er, Lm, Cp (MAR <- endereco)
+                          4'd8:    microcodigo = 16'h2404;         // JMP: Er, Lp, Rst
+                          4'd9:    microcodigo = zero ? 16'h2404   // JZ: pula se A = 0
+                                                      : 16'h410;   //     senao: Cp, Rst (pula o operando)
+                          4'd10:   microcodigo = zero ? 16'h410    // JNZ: pula se A != 0
+                                                      : 16'h2404;
+                          4'd11:   microcodigo = 16'h4430;         // IN: Ei, La, Cp, Rst
+                          4'd12:   microcodigo = 16'h8c10;         // OUT: Ea, Lo, Cp, Rst
+                          default: microcodigo = 16'h000;
                       endcase
                 4'd4: case (op)
-                          4'd2:    microcodigo = 12'h4a0;          // ADDI: Eu, La, Rst
-                          4'd3:    microcodigo = 12'h5a0;          // SUBI: Su, Eu, La, Rst
-                          default: microcodigo = 12'h000;
+                          4'd2:    microcodigo = 16'h4a0;          // ADDI: Eu, La, Rst
+                          4'd3:    microcodigo = 16'h5a0;          // SUBI: Su, Eu, La, Rst
+                          4'd4:    microcodigo = 16'h424;          // LDA: Er, La, Rst
+                          4'd5:    microcodigo = 16'h1c00;         // STA: Ea, Wm, Rst
+                          4'd6, 4'd7:
+                                   microcodigo = 16'h044;          // ADD/SUB: Er, Lb
+                          default: microcodigo = 16'h000;
                       endcase
-                default: microcodigo = 12'h000;
+                4'd5: case (op)
+                          4'd6:    microcodigo = 16'h4a0;          // ADD: Eu, La, Rst
+                          4'd7:    microcodigo = 16'h5a0;          // SUB: Su, Eu, La, Rst
+                          default: microcodigo = 16'h000;
+                      endcase
+                default: microcodigo = 16'h000;
             endcase
         end
     endfunction
 
     // Controlador (combinacional: depende de T e IR)
-    assign palavra = microcodigo(t, ir[3:0]);
+    assign z = (a == 8'h00);                  // A = 0 ?
+    assign palavra = microcodigo(t, ir[3:0], z);
     assign ep    = palavra[0];
     assign lm    = palavra[1];
     assign er    = palavra[2];
@@ -90,26 +132,34 @@ module microedu8_cpu (
     assign su    = palavra[8];
     assign hlt   = palavra[9];
     assign rst_t = palavra[10];
+    assign ea    = palavra[11];
+    assign wm    = palavra[12];
+    assign lp    = palavra[13];
+    assign ei    = palavra[14];
+    assign lo    = palavra[15];
 
-    // Memoria: leitura assincrona em M[MAR]
-    assign m = programa(mar);
+    // Memoria: leitura assincrona em M[MAR] (80-FF = RAM, abaixo = ROM)
+    assign m = mar[7] ? ram[mar[6:0]] : programa(mar);
 
     // ULA: A + B  ou  A - B
     assign soma = su ? (a - b) : (a + b);
 
-    // Barramento W: so uma fonte por vez (Ep, Er ou Eu)
-    assign w = ep ? pc : er ? m : eu ? soma : 8'h00;
+    // Barramento W: so uma fonte por vez (Ep, Er, Eu, Ea ou Ei)
+    assign w = ep ? pc : er ? m : eu ? soma : ea ? a : ei ? sw_in : 8'h00;
 
     // Registradores (subida do clock; so andam quando ce = 1)
     always @(posedge clk) begin
         if (rst) begin
-            a <= 0; b <= 0; pc <= 0; mar <= 0; ir <= 0; t <= 0;
+            a <= 0; b <= 0; pc <= 0; mar <= 0; ir <= 0; t <= 0; saida <= 0;
         end else if (ce) begin
             if (lm) mar <= w;
             if (li) ir  <= w;
             if (la) a   <= w;
             if (lb) b   <= w;
-            if (cp) pc  <= pc + 8'd1;
+            if (lo) saida <= w;
+            if (lp)      pc <= w;                   // pulo: PC <- endereco
+            else if (cp) pc <= pc + 8'd1;
+            if (wm && mar[7]) ram[mar[6:0]] <= w;   // escreve na RAM
             if (!hlt) begin                    // Hlt congela o contador T
                 if (rst_t) t <= 0;             // Rst volta ao passo 0
                 else       t <= t + 4'd1;
@@ -118,6 +168,7 @@ module microedu8_cpu (
     end
 
     assign a_out   = a;
+    assign saida_out = saida;
     assign pc_out  = pc;
     assign ir_out  = ir;
     assign mar_out = mar;
@@ -181,15 +232,18 @@ module microedu8_top #(
     input  wire [9:0] SW,
     output wire [9:0] LEDR,
     output wire [6:0] HEX0,
-    output wire [6:0] HEX1
+    output wire [6:0] HEX1,
+    output wire [6:0] HEX2,
+    output wire [6:0] HEX3
 );
     wire passo;
-    wire [7:0] a;
+    wire [7:0] a, saida;
     wire halted;
     reg  r0, r1, rst, pisca;
     reg  [31:0] cdiv;
-    wire auto_pulso = (cdiv >= DIV - 1);
-    wire ce = passo | (SW[0] & auto_pulso);
+    wire [31:0] limite = SW[8] ? (DIV / 25) : DIV;     // SW8 = rapido
+    wire auto_pulso = (cdiv >= limite - 1);
+    wire ce = passo | (SW[9] & auto_pulso);
 
     initial begin r0 = 1; r1 = 1; rst = 1; pisca = 0; cdiv = 0; end
 
@@ -206,10 +260,13 @@ module microedu8_top #(
 
     microedu8_cpu u_cpu (
         .clk(CLOCK_50), .ce(ce), .rst(rst),
+        .sw_in(SW[7:0]), .saida_out(saida),
         .a_out(a), .pc_out(), .ir_out(), .mar_out(), .t_out(), .halted(halted));
 
     hex7seg u_h0 (.v(a[3:0]), .seg(HEX0));
     hex7seg u_h1 (.v(a[7:4]), .seg(HEX1));
+    hex7seg u_h2 (.v(saida[3:0]), .seg(HEX2));
+    hex7seg u_h3 (.v(saida[7:4]), .seg(HEX3));
 
     assign LEDR[7:0] = a;
     assign LEDR[8]   = halted;
