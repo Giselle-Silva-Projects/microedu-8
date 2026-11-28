@@ -11,12 +11,14 @@ IFSP Guarulhos. Autora: Giselle Creuza Silva.
 
 | Parte | Situação |
 |---|---|
-| CPU (microcódigo, 18 instruções) | pronta, testada em simulação |
-| Bootloader (ROM) | pronto, testado em simulação |
-| Sistema com menu: soma e subtração | pronto, testado em simulação |
+| CPU (microcódigo, 17 instruções) | pronta, testada em simulação e na placa |
+| Bootloader (ROM) | pronto, testado em simulação e na placa |
+| Sistema com menu: soma e subtração | pronto, testado em simulação e na placa |
 | Assembler (`montador.py`) | pronto |
-| Teste na placa real | pendente (a placa fica no laboratório) |
-| Programa de demonstração final | em andamento |
+| Teste na placa DE1-SoC | feito: boot, menu, soma, subtração, reset |
+| Mudança ao vivo de uma linha de código | testada (menu F0 → C0) |
+| Programa de demonstração | calculadora (soma e subtração), funcionando |
+| Artigo e defesa | em andamento |
 
 ## Como funciona (visão geral)
 
@@ -30,7 +32,13 @@ IFSP Guarulhos. Autora: Giselle Creuza Silva.
    - opção `2`: subtração de dois números;
    - outra opção: volta ao menu.
 4. A calculadora pede o 1º número (`A1`), o 2º número (`A2`) e mostra o
-   resultado. ENTER volta ao menu.
+   resultado. ENTER volta ao menu. Na subtração, um resultado negativo aparece
+   em complemento de dois (3 − 5 = `FE`).
+
+A rotina `le_numero` (espera ENTER e lê as chaves) é usada pelo menu e pela
+calculadora, e faz o papel de uma "chamada de sistema".
+
+O boot leva cerca de 11 segundos na placa, com SW9 e SW8 ligadas.
 
 ## Entradas e saídas (DE1-SoC)
 
@@ -47,6 +55,37 @@ IFSP Guarulhos. Autora: Giselle Creuza Silva.
 | LEDR0–7 | acumulador A em binário |
 | LEDR8 | acende quando a CPU executou `HLT` |
 | LEDR9 | muda a cada passo |
+
+Para o uso normal, **SW9 e SW8 ficam sempre ligadas**.
+
+## Esquemático (diagrama de blocos)
+
+Como o projeto usa somente os elementos da própria DE1-SoC (sem placa de
+circuito impresso própria), o esquemático é a ligação entre esses elementos e a
+máquina dentro do FPGA:
+
+```
+ ENTRADAS (DE1-SoC)                FPGA                SAÍDAS (DE1-SoC)
+
+ CLOCK_50 ------------>+---------------------------+--> HEX3:HEX2  (OUT)
+ KEY0 (passo)  ------->|        MicroEdu-8         |--> HEX1:HEX0  (A)
+ KEY1 (reset)  ------->|                           |--> LEDR0-7    (A em bin.)
+ KEY2 (ENTER)  ------->|  CPU + ROM + RAM          |--> LEDR8      (HLT)
+ SW0-SW7 (dados) ----->|  bootloader + menu        |--> LEDR9      (passo)
+ SW8, SW9 (velocidade)>+---------------------------+
+```
+
+Os pinos usados estão em `hdl/pinos_de1soc.qsf` (53 sinais, padrão 3,3 V LVTTL).
+Principais:
+
+| Sinal | Pino |
+|---|---|
+| CLOCK_50 | AF14 |
+| KEY0, KEY1, KEY2 | AA14, AA15, W15 |
+| SW0–SW9 | AB12, AC12, AF9, AF10, AD11, AD12, AE11, AC9, AD10, AE12 |
+| LEDR0–LEDR9 | V16, W16, V17, V18, W17, W19, Y19, W20, W21, Y21 |
+
+Os pinos dos displays HEX0 a HEX3 estão no arquivo `.qsf`.
 
 ## Arquitetura
 
@@ -93,20 +132,41 @@ O assembler também aceita as pseudo-instruções `CALL alvo` e `RET`
 ## Estrutura do repositório
 
 ```
-hdl/microedu8_top.v     CPU + topo para a placa (Verilog)
-software/montador.py    assembler (Python 3)
-software/rom.asm        bootloader + sistema com menu
-software/dobro.asm      exemplo simples
+hdl/microedu8_top.v      CPU + topo para a placa (Verilog)
+hdl/pinos_de1soc.qsf     pinos da DE1-SoC para o Quartus
+software/montador.py     assembler (Python 3)
+software/rom.asm         bootloader + sistema com menu
+software/dobro.asm       exemplo simples
 ```
 
 ## Como usar
 
-### Simulador / placa
+### Na placa DE1-SoC (Quartus Prime Lite 20.1)
 
-1. Carregue `hdl/microedu8_top.v` no simulador (ou compile no Quartus para a
-   DE1-SoC).
-2. Ligue SW9 e SW8 (execução automática rápida) e dê reset (KEY1).
-3. Espere `b0` virar `F0` (o boot copia o sistema para a RAM).
+1. Crie um projeto novo (**File → New Project Wizard**), com o dispositivo
+   `5CSEMA5F31C6` e o top-level `microedu8_top`. Adicione `hdl/microedu8_top.v`.
+2. Importe os pinos: **Assignments → Import Assignments** e escolha
+   `hdl/pinos_de1soc.qsf`.
+3. Compile (**Processing → Start Compilation**). Os avisos de temporização
+   (falta do arquivo `.sdc`) são esperados.
+4. Grave na placa: **Tools → Programmer**, escolha o hardware `DE-SoC [USB-1]`,
+   selecione `output_files/microedu8_top.sof` no chip `5CSEMA5` e clique em
+   **Start**.
+5. Ligue SW9 e SW8 (execução automática rápida) e dê reset (KEY1).
+6. Espere `b0` virar `F0` (o boot copia o sistema para a RAM).
+7. Ponha o número da opção nas chaves e aperte KEY2.
+
+O FPGA perde o projeto quando a placa perde energia, então é preciso gravar o
+`.sof` de novo a cada vez que ela é ligada.
+
+Uso de recursos na compilação: cerca de 755 ALMs (2%), 1187 registradores e
+53 pinos.
+
+### Simulador
+
+1. Carregue `hdl/microedu8_top.v` no simulador.
+2. Ligue SW9 e SW8 e dê reset (KEY1).
+3. Espere `b0` virar `F0`.
 4. Ponha o número da opção nas chaves e aperte KEY2.
 
 Observação: no simulador, segure KEY2 por cerca de 1 segundo.
@@ -120,8 +180,17 @@ python montador.py rom.asm
 O assembler imprime a listagem (endereço, bytes, fonte) e as linhas de Verilog
 para colar na função `programa` de `microedu8_top.v`.
 
+## Decisões de projeto
+
+- **Sem placa de circuito impresso (PCB) própria.** Por orientação do professor,
+  o projeto usa os elementos da própria placa FPGA, e o esquemático é feito com
+  eles (seção "Esquemático").
+- **Menu em vez de monitor de memória.** O sistema é um menu com a calculadora
+  e uma rotina de leitura que faz o papel de chamada de sistema.
+- **Saída nos displays de 7 segmentos**, sem terminal serial.
+
 ## Próximos passos
 
-- Teste na placa DE1-SoC (pinos, velocidade do clock e filtro dos botões).
-- Programa de demonstração final.
-- Placa de circuito impresso (PCB), se exigida.
+- Artigo (resumo expandido) e preparação da defesa.
+- Ensaio da demonstração na Mostra Garagem.
+- Se sobrar tempo: um programa extra de demonstração.
